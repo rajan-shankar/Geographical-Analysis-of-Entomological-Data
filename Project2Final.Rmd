@@ -1,0 +1,415 @@
+---
+title: "Geographical Analysis of Entomological Data"
+author: "490411065, 490389982, 490449275, 490407231"
+subtitle: "Project 2"
+date: "University of Sydney | DATA1901 | April 2019"
+output:
+  html_document:
+    fig_caption: yes
+    number_sections: yes
+    self_contained: yes
+    theme: flatly
+    toc: true
+    toc_depth: 3
+    toc_float: true
+    code_folding: hide
+---
+
+<br>
+
+# Executive Summary
+
+Our project aims to investigate the geographical origins of Dr Jude Philp's collection, which contains specimens from all over the globe, dating back to the 1750s. Consequently, the research question centred around the orders that feature the greatest geographical distribution.
+
+Our approach involved examining the number of countries that each order was distributed over. Reverse geocoding techniques in conjunction with bar plots revealed that *Coleoptera* was spread across the most countries. This was expected as it was the order with the most number of entries in the collection. However, *Hemiptera* and *Hymenoptera* had the 3rd and 4th greatest spreads respectively, despite having switched places in terms of their numbers of entries in the collection. Similarly, *Ericales* had the 6th greatest spread, despite it being 7th in terms of its number of entries.
+
+In general, there appeared to be a fairly linear relationship between the amount of countries that an order spread across, and the number of entries it had in the collection.
+
+We also produced boxplots for the 6 orders that spread across the most countries to further analyse how even this spread across countries actually was. All of the 6 orders featured a country where >25% of their entries resided in. However, this was more the case with *Coleoptera* and *Diptera* (which respectively had 48.9% and 69.3% of entries located in a single country, as well as small IQRs) than it was with *Ericales* (which had 29.8% of entries located in a single country, and a much larger IQR, hence a more even spread across its countries).
+
+Finally, the choice to investigate 'order' out of all the taxonomic ranks, was to make the findings of our investigation more understandable to visitors in a museum. Since order refers to whether an insect is a beetle, wasp, butterfly, etc., it is a more intuitive classification for those without entomological expertise.
+
+<br>
+
+# Full Report
+
+## Initial Data Analysis (IDA)
+
+The analysis of Dr Jude Philp's entomological data considers her (and by extension, the Chau Chak Wing Museum) as a stakeholder, as it aims to investigate the geographical origins of her curated collection. The dataset is a collection of species that were discovered all over the world, some dating back a few centuries, and it provides details (some missing) on where they were found, how many were found, and some of their taxonomical classifications. 
+
+With geographical location in mind, the dataset needs to be wrangled in such a way that all entries with N/A `locality` values are removed (as they cannot contribute to the analysis), and then joined to Kevin's provided taxonomical and location datasets which provide latitude/longitude values as well as classifications of genus, family, order, etc. for each entry.
+
+```{r, message = F, warning = F}
+library(readxl)
+library(janitor)
+library(skimr)
+library(magrittr)
+library(dplyr)
+library(stringr)
+library(leaflet)
+library(threejs)
+library(maps)
+library(sp)
+library(rworldmap)
+library(rworldxtra)
+library(plotly)
+library(ggplot2)
+library(gridExtra)
+```
+
+```{r, message = F, warning = F}
+#read in and clean raw data
+data = readxl::read_excel(
+  path = "ProvenanceOfEntomology.xlsx", 
+  sheet = 3, 
+  guess_max = 1e6,
+  na = c("[empty]", "[not identified]", "[on display]", "[no locality]", "[unknown locality]")
+)
+data = data %>% 
+  janitor::clean_names()
+data = data %>% 
+  dplyr::mutate(
+    level_3 = as.character(level_3),
+    specimens = as.integer(specimens)
+  ) %>% 
+  dplyr::select(-x4)
+data = data %>% 
+  dplyr::filter(complete.cases(locality))
+
+#read in other two datasets
+taxData = readr::read_csv("taxonomyData.csv")
+taxData = taxData %>% 
+  dplyr::filter(complete.cases(order))
+locationData = readr::read_csv("locationData.csv")
+
+#inner join all three datasets
+data = dplyr::inner_join(data, taxData, by = c("name_in_label" = "user_supplied_name"))
+data = dplyr::inner_join(data, locationData, by = c("locality" = "uniqueLocation"))
+data = data %>% dplyr::select(-order.x)
+colnames(data)[colnames(data) == "order.y"] <- "order"
+data = data %>% 
+  dplyr::filter(complete.cases(lon))
+data = data %>% 
+  dplyr::filter(complete.cases(lat))
+
+#view structure of data
+glimpse(data)
+```
+
+</br>
+
+To get an initial idea of the geographical distribution of the collection for which the latitude and longitude values are available, an interactive globe may be plotted.
+
+```{r, message = F, warning = F}
+#plot interactive globe
+globejs(lat = data$lat, long = data$lon, atmosphere = TRUE)
+```
+
+</br>
+
+One approach to investigate geographical origins involves observing the number of *countries* in which each genus/family/order spreads across. The number of countries is a better measure than the number of continents as the scope of a continent is too broad, and thus does not provide precise enough insights into the granular details of distribution. To facilitate this, all entries in the wrangled dataset where `type = "continent"` must be removed, because the latitude/longitude references for continents all point to one specific point inside the respective continent, whereas these species could have come from a variety of different countries within that continent. Whilst not the most desirable decision, leaving these entries in could lead to more misleading results than simply removing them.
+
+```{r, message = F, warning = F}
+length(data$species)
+```
+
+Number of entries after removal:
+
+```{r, message = F, warning = F}
+#remove entries with location type continent 
+data = subset(data, data$type != "continent")
+length(data$species)
+```
+
+</br>
+
+Moreover, the *order* is a good taxonomical classification to focus on for country distributions because a lot of the orders contain sufficient entries within them to produce meaningful insights, as opposed to more specific classifications such as *genus*, which only contains a few entries per genus. Also, order refers to whether an insect is a beetle, wasp, butterfly, etc., meaning it is a more intuitive classification. This is especially important when considering that a museum is a stakeholder in this analysis, and visitors at a museum (usually the general public) may not have the required domain knowledge to understand the more specific classifications.
+
+Hence, although the wrangled and joined dataset contains 27 variables, the `order`, `lat` and `lon` variables are going to see the most use when attempting to answer the research question.
+
+```{r, message = F, warning = F}
+glimpse(data$order); glimpse(data$lat); glimpse(data$lon)
+```
+
+R's classifications of the 3 variables above in their respective order are all correct.
+
+* `order` is the order of an entry, according to the GBIF data that Kevin scraped to map the correct order to each specie
+* `lat` and `lon` are the latitude and longitude of the locality representing where a specie was found
+
+</br>
+
+## Research Question: Which orders feature the greatest geographical distribution?
+
+One method of calculating the geographical distribution of an order involves taking into account the *number of countries* which that order spreads across. As the cleaned dataset features complete `lat` and `lon` values, we can *reverse geocode* these values using the Bing Maps API to obtain the countries that they are within. The table below shows the 10 orders with highest country distributions:
+
+```{r, message = F, warning = F}
+#converting (lat,lon) --> country
+bingConvertedData = read.csv("BingConvertedData.csv")
+#the 3 lines below show how the BingConvertedData.csv file was created (this took R roughly 1 hour to do!)
+#library(revgeo)
+#bingConvertedData = data.frame(revgeo(data$lon, data$lat, provider = "bing", API = "AjbVCNKZL5AoIT-bhOD-gTJ4wkuMc5gVVGQsWgyDbGkn7CyMmk3", output = "hash", item = "country"))
+#write.csv(bingConvertedData, "BingConvertedData.csv")
+
+ordCountryFull = data.frame(order = data$order, country = bingConvertedData$country, lat = data$lat, lon = data$lon)
+ordCountryFull = subset(ordCountryFull, ordCountryFull$country != "Country Not Found")
+
+#allocate number of countries to each order
+numCountries = NULL
+for (k in unique(data$order)) {
+  #make sure to subset AGAIN to exclude entries with country = "country not found"
+  numCountries = c(numCountries, length(unique(subset(ordCountryFull, ordCountryFull$order == k)$country)))
+}
+ordCountry = data.frame(order = unique(data$order), number_of_countries = numCountries)
+ordCountry = ordCountry[order(ordCountry$number_of_countries, decreasing = TRUE),]
+
+#table of the 10 orders that spread across the most countries
+droplevels(head(ordCountry, 10))
+```
+
+</br>
+
+Unfortunately, Bing Maps is not able to figure out the country for every pair of (`lat`, `lon`) values, so we need to remove all entries where `"Country Not Found"` is returned (which luckily, is only ~3% of all of the cleaned dataset's entries). Since the analysis focuses on the orders with greatest distribution, this should not cause much variation in the results.
+
+As the table above indicates that there is a relatively large drop from *Ericales* to *Araneae* (18 countries to 9), we will just focus on the top 6 orders:
+
+```{r, message = F, warning = F}
+#bar plot of the 6 orders that spread across the most countries
+xform = list(title = "Order", categoryorder = "array", categoryarray = droplevels(head(ordCountry$order, 6)))
+plot_ly(x = droplevels(head(ordCountry$order, 6)), y = head(ordCountry$number_of_countries, 6), type = "bar",) %>%
+  layout(title = "6 Orders that Spread Across the Most Countries", xaxis = xform, yaxis = list(title = "Number of Countries"))
+```
+
+</br>
+
+Now, we can also produce a table which showcases the orders that appear the most frequently:
+
+```{r, message = F, warning = F}
+#table of the 10 orders with most entries
+freq = table(ordCountryFull$order)
+freq = freq[order(freq, decreasing = TRUE)]
+head(freq, 10)
+```
+
+By comparing this table and the bar plot, we can see that while *Hymenoptera* and *Hemiptera* are respectively 3rd and 4th in terms of their frequency, they switch places when it comes to the numbers of countries that they spread across. Similarly, *Ericales* has the 6th greatest spread, despite it being 7th in frequency. Although in general, there is a fairly linear relationship between the number of entries of an order and the number of countries that it spreads across.
+
+We can also visualise the exact distributions of the top 6 orders by plotting their entries on world maps:
+
+```{r, message = F, warning = F}
+#prerequisite code for map plotting
+p <- ggplot() + coord_fixed() +
+  xlab("") + ylab("")
+base_world_messy <- p + geom_polygon(data=map_data("world"), aes(x=long, y=lat, group=group), 
+                                     colour="light green", fill="light green")
+cleanup <- 
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(), 
+        panel.background = element_rect(fill = 'white', colour = 'white'), 
+        axis.line = element_line(colour = "white"), legend.position="none",
+        axis.ticks=element_blank(), axis.text.x=element_blank(),
+        axis.text.y=element_blank())
+base_world <- base_world_messy + cleanup
+
+#world map plots for each of the 4 orders that spread across the most countries 
+cole <- 
+  base_world +
+  geom_point(data=subset(dplyr::select(ordCountryFull, order, lat, lon), ordCountryFull$order == "Coleoptera"), 
+             aes(x=lon, y=lat), colour="Blue", 
+             fill="Sky Blue",pch=21, size=2, alpha=I(0.5)) + 
+  ggtitle("Coleoptera") + theme(plot.title = element_text(hjust = 0.5))
+
+lepi <- 
+  base_world +
+  geom_point(data=subset(dplyr::select(ordCountryFull, order, lat, lon), ordCountryFull$order == "Lepidoptera"), 
+             aes(x=lon, y=lat), colour="Blue", 
+             fill="Sky Blue",pch=21, size=2, alpha=I(0.5)) + 
+  ggtitle("Lepidoptera") + theme(plot.title = element_text(hjust = 0.5))
+
+hemi <- 
+  base_world +
+  geom_point(data=subset(dplyr::select(ordCountryFull, order, lat, lon), ordCountryFull$order == "Hemiptera"), 
+             aes(x=lon, y=lat), colour="Blue", 
+             fill="Sky Blue",pch=21, size=2, alpha=I(0.5)) + 
+  ggtitle("Hemiptera") + theme(plot.title = element_text(hjust = 0.5))
+
+hyme <- 
+  base_world +
+  geom_point(data=subset(dplyr::select(ordCountryFull, order, lat, lon), ordCountryFull$order == "Hymenoptera"), 
+             aes(x=lon, y=lat), colour="Blue", 
+             fill="Sky Blue",pch=21, size=2, alpha=I(0.5)) + 
+  ggtitle("Hymenoptera") + theme(plot.title = element_text(hjust = 0.5))
+
+dip <- 
+  base_world +
+  geom_point(data=subset(dplyr::select(ordCountryFull, order, lat, lon), ordCountryFull$order == "Diptera"), 
+             aes(x=lon, y=lat), colour="Blue", 
+             fill="Sky Blue",pch=21, size=2, alpha=I(0.5)) + 
+  ggtitle("Diptera") + theme(plot.title = element_text(hjust = 0.5))
+
+eri <- 
+  base_world +
+  geom_point(data=subset(dplyr::select(ordCountryFull, order, lat, lon), ordCountryFull$order == "Ericales"), 
+             aes(x=lon, y=lat), colour="Blue", 
+             fill="Sky Blue",pch=21, size=2, alpha=I(0.5)) + 
+  ggtitle("Ericales") + theme(plot.title = element_text(hjust = 0.5))
+
+grid.arrange(cole, lepi, hemi, hyme, dip, eri, nrow = 3, ncol = 2)
+```
+
+</br>
+
+Now, we will engage in some more deeper analysis by exploring how evenly these orders are spread across their respective countries. This can be done by observing the percentage of entries in each country for a specified order. For example, a bar plot depicting this can be produced for *Ericales*:
+
+```{r, message = F, warning = F}
+#calculates number of entries per country for a specified order
+countryVec = NULL
+numInCountry = NULL
+for (k in unique(subset(ordCountryFull, ordCountryFull$order == "Ericales")$country)) {
+  countryVec = c(countryVec, k)
+   numInCountry = c(numInCountry, length(subset(subset(ordCountryFull, ordCountryFull$order == "Ericales"), subset(ordCountryFull, ordCountryFull$order == "Ericales")$country == k)$country))
+}
+eriPercent = data.frame(countryVec, numInCountry)
+
+#converts number of entries per country to percentage per country
+totalCountries = sum(eriPercent$numInCountry)
+for (k in c(1:length(eriPercent$numInCountry))) {
+  eriPercent$numInCountry[k] = (eriPercent$numInCountry[k] / totalCountries) * 100
+}
+eriPercent = eriPercent[order(eriPercent$numInCountry, decreasing = TRUE),]
+
+#bar plot of percentage per country for a specified order
+xform <- list(title = "Country", categoryorder = "array", categoryarray = eriPercent$countryVec)
+#NOTE: double click plot to auto-scale y-axis
+plot_ly(x = eriPercent$countryVec, y = eriPercent$numInCountry, type = "bar",) %>%
+  layout(title = "Order 'Ericales' - Percentage of Entries by Country", xaxis = xform, yaxis = list(title = "Percentage", range = c(0, 100)))
+```
+
+</br>
+
+However, to compare the evenness of the spread across *each* of the 6 orders, a different type of plot will be required. A box plot is ideal for this, as we can position 6 boxes side-by-side to enable cross comparison, where each box portrays the range of percentages per country for a specific order.
+
+```{r, message = F, warning = F}
+#NOTE: could have done this with a loop, but then again, there are only 5 repetitions
+
+#calculates number of entries per country for a specified order
+countryVec = NULL
+numInCountry = NULL
+for (k in unique(subset(ordCountryFull, ordCountryFull$order == "Coleoptera")$country)) {
+  countryVec = c(countryVec, k)
+   numInCountry = c(numInCountry, length(subset(subset(ordCountryFull, ordCountryFull$order == "Coleoptera"), subset(ordCountryFull, ordCountryFull$order == "Coleoptera")$country == k)$country))
+}
+colePercent = data.frame(countryVec, numInCountry)
+
+#converts number of entries per country to percentage per country
+totalCountries = sum(colePercent$numInCountry)
+for (k in c(1:length(colePercent$numInCountry))) {
+  colePercent$numInCountry[k] = (colePercent$numInCountry[k] / totalCountries) * 100
+}
+colePercent = colePercent[order(colePercent$numInCountry, decreasing = TRUE),]
+
+
+#calculates number of entries per country for a specified order
+countryVec = NULL
+numInCountry = NULL
+for (k in unique(subset(ordCountryFull, ordCountryFull$order == "Lepidoptera")$country)) {
+  countryVec = c(countryVec, k)
+   numInCountry = c(numInCountry, length(subset(subset(ordCountryFull, ordCountryFull$order == "Lepidoptera"), subset(ordCountryFull, ordCountryFull$order == "Lepidoptera")$country == k)$country))
+}
+lepiPercent = data.frame(countryVec, numInCountry)
+
+#converts number of entries per country to percentage per country
+totalCountries = sum(lepiPercent$numInCountry)
+for (k in c(1:length(lepiPercent$numInCountry))) {
+  lepiPercent$numInCountry[k] = (lepiPercent$numInCountry[k] / totalCountries) * 100
+}
+lepiPercent = lepiPercent[order(lepiPercent$numInCountry, decreasing = TRUE),]
+
+
+#calculates number of entries per country for a specified order
+countryVec = NULL
+numInCountry = NULL
+for (k in unique(subset(ordCountryFull, ordCountryFull$order == "Hemiptera")$country)) {
+  countryVec = c(countryVec, k)
+   numInCountry = c(numInCountry, length(subset(subset(ordCountryFull, ordCountryFull$order == "Hemiptera"), subset(ordCountryFull, ordCountryFull$order == "Hemiptera")$country == k)$country))
+}
+hemiPercent = data.frame(countryVec, numInCountry)
+
+#converts number of entries per country to percentage per country
+totalCountries = sum(hemiPercent$numInCountry)
+for (k in c(1:length(hemiPercent$numInCountry))) {
+  hemiPercent$numInCountry[k] = (hemiPercent$numInCountry[k] / totalCountries) * 100
+}
+hemiPercent = hemiPercent[order(hemiPercent$numInCountry, decreasing = TRUE),]
+
+
+#calculates number of entries per country for a specified order
+countryVec = NULL
+numInCountry = NULL
+for (k in unique(subset(ordCountryFull, ordCountryFull$order == "Hymenoptera")$country)) {
+  countryVec = c(countryVec, k)
+   numInCountry = c(numInCountry, length(subset(subset(ordCountryFull, ordCountryFull$order == "Hymenoptera"), subset(ordCountryFull, ordCountryFull$order == "Hymenoptera")$country == k)$country))
+}
+hymePercent = data.frame(countryVec, numInCountry)
+
+#converts number of entries per country to percentage per country
+totalCountries = sum(hymePercent$numInCountry)
+for (k in c(1:length(hymePercent$numInCountry))) {
+  hymePercent$numInCountry[k] = (hymePercent$numInCountry[k] / totalCountries) * 100
+}
+hymePercent = hymePercent[order(hymePercent$numInCountry, decreasing = TRUE),]
+
+
+countryVec = NULL
+numInCountry = NULL
+for (k in unique(subset(ordCountryFull, ordCountryFull$order == "Diptera")$country)) {
+  countryVec = c(countryVec, k)
+   numInCountry = c(numInCountry, length(subset(subset(ordCountryFull, ordCountryFull$order == "Diptera"), subset(ordCountryFull, ordCountryFull$order == "Diptera")$country == k)$country))
+}
+dipPercent = data.frame(countryVec, numInCountry)
+
+#converts number of entries per country to percentage per country
+totalCountries = sum(dipPercent$numInCountry)
+for (k in c(1:length(dipPercent$numInCountry))) {
+  dipPercent$numInCountry[k] = (dipPercent$numInCountry[k] / totalCountries) * 100
+}
+dipPercent = dipPercent[order(dipPercent$numInCountry, decreasing = TRUE),]
+
+#box plot of percentage of entries per country, for each of the 6 orders that spread across the most countries
+boxx <- plot_ly(y = ~colePercent$numInCountry, type = "box", name = "Coleoptera") %>%
+  add_trace(y = ~lepiPercent$numInCountry, name = "Lepidoptera") %>% 
+  add_trace(y = ~hemiPercent$numInCountry, name = "Hemiptera") %>% 
+  add_trace(y = ~hymePercent$numInCountry, name = "Hymenoptera") %>% 
+  add_trace(y = ~dipPercent$numInCountry, name = "Diptera") %>%
+  add_trace(y = ~eriPercent$numInCountry, name = "Ericales") %>%
+  layout(title = "Country Percentage Ranges for the 6 Most Spread Orders", xaxis = list(title = "Order"), yaxis = list(title = "Percentage"))
+boxx
+```
+
+By observing the box plot, we can see that all of the 6 orders feature a single country where >25% of their entries reside in. However, this is more the case with *Coleoptera* and *Diptera* (which respectively have 48.9% and 69.3% of entries located in a single country, as well as small IQRs) than it is with *Ericales* (which has 29.8% of entries located in a single country, and a much larger IQR, hence a more even spread across its countries).
+
+</br>
+
+# References
+
+* 3D Interactive Globe Plot
+    + Hoare, J. (2019). Building an Interactive Globe Visualization in R. [online] R-bloggers. Available at: https://www.r-bloggers.com/building-an-interactive-globe-visualization-in-r/
+
+* Reverse Geocoding Function using a Maps API
+    + Cran.r-project.org. (2019). [online] Available at: https://cran.r-project.org/web/packages/revgeo/revgeo.pdf?fbclid=IwAR123oLDEydCDfeBherHTff5G8tphaTjqnz_YvKOdNubShot9q-tyXg1xl0
+
+* Bing Maps API
+    + Bingmapsportal.com. (2019). Bing Maps Dev Center - Bing Maps Dev Center. [online] Available at: https://www.bingmapsportal.com/?fbclid=IwAR3kh-LigT4usQioRU8ZebmA1xU0gSpHBmf6wvkfIlnjOUYPcXTtaokQ_gA [Accessed 18 Apr. 2019].
+
+* Plotly Cheat Sheet
+    + Images.plot.ly. (2019). [online] Available at: https://images.plot.ly/plotly-documentation/images/r_cheat_sheet.pdf?fbclid=IwAR3t5ineuO6iELpgw78hmkHTsInoTIfCQaZZWBF-DnOcIPcs5nX7_2qtVNA
+
+* General help with bits of code
+    + Stack Overflow. (2019). Stack Overflow - Where Developers Learn, Share, & Build Careers. [online] Available at: https://stackoverflow.com/
+    + Rdocumentation.org. (2019). R Documentation and manuals | R Documentation. [online] Available at: https://www.rdocumentation.org/
+
+* Creating ioslides Presentations
+    + Yihui Xie, G. (2019). 4.1 ioslides presentation | R Markdown: The Definitive Guide. [online] Bookdown.org. Available at: https://bookdown.org/yihui/rmarkdown/ioslides-presentation.html 
+    + Yihui.name. (2019). Options - Yihui Xie. [online] Available at: https://yihui.name/knitr/options/
+
+* Plotting 2D Maps
+    + Sarahleejane.github.io. (2019). plotting data points on maps with R. [online] Available at: http://sarahleejane.github.io/learning/r/2014/09/21/plotting-data-points-on-maps-with-r.html
+
+<br>
